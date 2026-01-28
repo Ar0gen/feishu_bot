@@ -1,0 +1,20 @@
+# 敏感配置文件
+.env
+
+# Python 虚拟环境
+venv/
+.venv/
+env/
+
+# 数据目录（包含历史记录、语音素材等）
+# 建议数据与代码分开，不上传到代码仓库
+data/
+
+# Python 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 操作系统临时文件
+.DS_Store
+Thumbs.db
