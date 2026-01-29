@@ -11,8 +11,10 @@ APP_SECRET = os.getenv("APP_SECRET")
 # const
 TENANT_ACCESS_TOKEN_URI = "/open-apis/auth/v3/tenant_access_token/internal"
 MESSAGE_URI = "/open-apis/im/v1/messages"
+MESSAGE_RESOURCE_URI = "/open-apis/im/v1/messages/{message_id}/resources/{file_key}"
 IMAGE_URI = "/open-apis/im/v1/images"
 FILE_URI = "/open-apis/im/v1/files"
+CHATS_URI = "/open-apis/im/v1/chats"
 CARD_CREATE_URI = "/open-apis/cardkit/v1/cards"
 BITABLE_RECORD_URI = "/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
 SHEET_VALUES_URI = "/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range}"
@@ -196,26 +198,6 @@ class MessageApiClient(object):
                     logging.info(f"清理临时文件: {temp_file_to_clean}")
                 except: pass
 
-    def get_bitable_list(self, app_token, table_id, page_size=100, page_token=None):
-        logging.info(f"正在读取多维表格数据: app_token={app_token}, table_id={table_id}")
-        self._authorize_tenant_access_token()
-        url = "{}{}".format(self._lark_host, BITABLE_RECORD_URI.format(app_token=app_token, table_id=table_id))
-        headers = {
-            "Authorization": "Bearer " + self.tenant_access_token,
-        }
-        params = {
-            "page_size": page_size
-        }
-        if page_token:
-            params["page_token"] = page_token
-            
-        resp = requests.get(url=url, headers=headers, params=params)
-        MessageApiClient._check_error_response(resp)
-        data = resp.json().get("data", {})
-        items = data.get("items", [])
-        logging.info(f"成功读取 {len(items)} 条表格记录")
-        return items
-
     def get_spreadsheet_values(self, spreadsheet_token, range_name):
         logging.info(f"正在读取电子表格数据: spreadsheet_token={spreadsheet_token}, range={range_name}")
         self._authorize_tenant_access_token()
@@ -229,6 +211,65 @@ class MessageApiClient(object):
         values = value_range.get("values", [])
         logging.info(f"成功读取 {len(values)} 行电子表格数据")
         return values
+
+    def get_bot_chats(self):
+        """
+        获取机器人所在的群聊列表（支持自动分页获取全部）
+        """
+        logging.info("正在获取机器人所在的群聊列表...")
+        self._authorize_tenant_access_token()
+        url = "{}{}".format(self._lark_host, CHATS_URI)
+        headers = {
+            "Authorization": "Bearer " + self.tenant_access_token,
+        }
+        
+        all_items = []
+        page_token = ""
+        has_more = True
+        
+        while has_more:
+            params = {
+                "page_size": 100 # 尽量一次获取更多
+            }
+            if page_token:
+                params["page_token"] = page_token
+            
+            resp = requests.get(url=url, headers=headers, params=params)
+            MessageApiClient._check_error_response(resp)
+            
+            data = resp.json().get("data", {})
+            items = data.get("items", [])
+            all_items.extend(items)
+            
+            has_more = data.get("has_more", False)
+            page_token = data.get("page_token", "")
+            
+            if not has_more:
+                break
+                
+        logging.info(f"成功获取到全部 {len(all_items)} 个群聊")
+        return all_items
+
+    def get_message_resource(self, message_id, file_key, resource_type):
+        """
+        获取消息中的资源文件（图片或文件）。
+        resource_type: "image" 或 "file"
+        """
+        logging.info(f"正在下载消息资源: message_id={message_id}, file_key={file_key}, type={resource_type}")
+        self._authorize_tenant_access_token()
+        url = "{}{}".format(self._lark_host, MESSAGE_RESOURCE_URI.format(message_id=message_id, file_key=file_key))
+        headers = {
+            "Authorization": "Bearer " + self.tenant_access_token,
+        }
+        params = {
+            "type": resource_type
+        }
+        resp = requests.get(url=url, headers=headers, params=params)
+        # 资源下载接口返回的是二进制流，不能直接调用 _check_error_response
+        if resp.status_code != 200:
+            logging.error(f"下载资源失败: {resp.text}")
+            resp.raise_for_status()
+        return resp.content
 
     def send(self, receive_id_type, receive_id, msg_type, content):
         # send message to user, implemented based on Feishu open api capability. doc link: https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create

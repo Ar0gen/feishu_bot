@@ -3,10 +3,11 @@
 import os
 import logging
 import requests
+from datetime import datetime
 from collections import deque
 from api import MessageApiClient
 from event import MessageReceiveEvent, UrlVerificationEvent, EventManager
-from flask import Flask, jsonify
+from flask import Flask, jsonify, json
 from dotenv import load_dotenv, find_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from twitter_rss import TwitterRssFetcher
@@ -95,6 +96,17 @@ def check_twitter_updates():
     users_to_monitor = get_monitor_users()
     logging.info(f"本次监控用户列表: {[u['twitter_id'] for u in users_to_monitor]}")
     
+    # 获取机器人所在的所有群聊
+    try:
+        chats = message_api_client.get_bot_chats()
+        target_chat_ids = [chat['chat_id'] for chat in chats]
+        if not target_chat_ids:
+            logging.warning("未发现机器人所在的群聊，跳过推送")
+            return
+    except Exception as e:
+        logging.error(f"获取群聊列表失败: {e}")
+        return
+
     for user_info in users_to_monitor:
         username = user_info['twitter_id']
         display_name = user_info['name']
@@ -118,9 +130,13 @@ def check_twitter_updates():
                     # 2. 组装卡片 JSON
                     card_json = fetcher.build_tweet_card(tweet, image_keys, display_name=display_name)
                     
-                    # 3. 发送卡片到指定群聊
-                    message_api_client.send_card("chat_id", TARGET_CHAT_ID, card_json)
-                    logging.info(f"推文 {tweet['id']} 推送成功。")
+                    # 3. 广播发送卡片到所有群聊
+                    for chat_id in target_chat_ids:
+                        try:
+                            message_api_client.send_card("chat_id", chat_id, card_json)
+                            logging.info(f"推文 {tweet['id']} 推送到群聊 {chat_id} 成功。")
+                        except Exception as send_err:
+                            logging.error(f"推文 {tweet['id']} 推送到群聊 {chat_id} 失败: {send_err}")
             else:
                 logging.info(f"用户 @{username} 无新推文")
         except Exception as e:
@@ -128,9 +144,16 @@ def check_twitter_updates():
     logging.info("推特更新检查完成。")
 
 
+def refresh_voice_index():
+    logging.info("开始定时刷新语音库索引...")
+    voice_manager.refresh_index()
+    logging.info(f"语音库索引刷新完成，当前共有 {len(voice_manager.voice_pool)} 条语音素材")
+
+
 # 初始化定时任务
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_twitter_updates, "interval", minutes=1)
+scheduler.add_job(refresh_voice_index, "interval", minutes=5)
 
 
 @event_manager.register("url_verification")
@@ -156,89 +179,103 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
     sender_id = req_data.event.sender.sender_id
     message = req_data.event.message
     
-    if message.message_type != "text":
-        logging.warn("Other types of messages have not been processed yet")
+    if message.message_type not in ["text", "post"]:
+        logging.warn(f"Message type {message.message_type} has not been processed yet")
         return jsonify()
 
     chat_id = message.chat_id
     chat_type = message.chat_type
-    # 解析消息内容，获取纯文本
+    
+    # 解析消息内容
+    text_content = ""
+    image_keys = []
+    
     try:
         content_dict = json.loads(message.content)
-        text_content = content_dict.get("text", "")
+        if message.message_type == "text":
+            text_content = content_dict.get("text", "")
+        elif message.message_type == "post":
+            # 提取 post 中的所有文本和图片 key
+            text_parts = []
+            for row in content_dict.get("content", []):
+                for item in row:
+                    if item.get("tag") == "text":
+                        text_parts.append(item.get("text", ""))
+                    elif item.get("tag") == "img":
+                        image_keys.append(item.get("image_key"))
+            text_content = "".join(text_parts)
     except Exception as e:
         logging.error(f"解析消息内容失败: {e}")
         text_content = message.content
 
-    # 逻辑 1：判断是否需要回复语音（包含关键词，且在私聊中或群聊中被 @）
-    VOICE_KEYWORDS = ["随机语音", "抽一个", "试音", "来一句", "试听"]
-    has_voice_keyword = any(kw in text_content for kw in VOICE_KEYWORDS)
+    # 只有在私聊，或者群聊被 @ 时才响应指令
+    should_process_command = (chat_type == "p2p") or (chat_type == "group" and message.mentions)
     
-    should_reply_voice = False
-    
-    if has_voice_keyword:
-        if chat_type == "p2p":
-            # 私聊中直接说关键词即可
-            should_reply_voice = True
-        elif chat_type == "group":
-            # 群聊中需要关键词 + @ 机器人
-            if message.mentions:
-                should_reply_voice = True
-            
-    if should_reply_voice:
-        logging.info(f"触发语音回复逻辑。类型: {chat_type}, ChatID: {chat_id}, 内容: {text_content}")
-        voice_info = voice_manager.get_random_voice()
-        if voice_info:
+    if should_process_command:
+        # 逻辑 1：上传图片指令（仅在消息包含图片且含有关键词时触发）
+        if "上传图片" in text_content and image_keys:
+            logging.info(f"触发上传图片逻辑。ChatID: {chat_id}, 图片数量: {len(image_keys)}")
             try:
-                # 1. 准备富文本内容
-                post_content = {
-                    "zh_cn": {
-                        "title": "语音试听",
-                        "content": [
-                            [
-                                {
-                                    "tag": "text",
-                                    "text": f"为您随机抽取了 【{voice_info['cv_name']}】 的语音试听："
-                                }
-                            ]
-                        ]
-                    }
-                }
-
-                # 2. 如果有头像，上传并加入富文本
-                if voice_info.get('avatar_path'):
-                    try:
-                        img_key = message_api_client.upload_image(voice_info['avatar_path'])
-                        if img_key:
-                            post_content["zh_cn"]["content"].append([
-                                {
-                                    "tag": "img",
-                                    "image_key": img_key
-                                }
-                            ])
-                    except Exception as img_err:
-                        logging.error(f"头像上传失败: {img_err}")
-
-                # 3. 发送富文本提示
-                message_api_client.send_post("chat_id", chat_id, post_content)
+                data_root = os.getenv("DATA_ROOT", "data")
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                save_dir = os.path.join(data_root, "image", date_str)
+                os.makedirs(save_dir, exist_ok=True)
                 
-                # 4. 上传并发送语音
-                duration = get_audio_duration(voice_info['path'])
-                file_key = message_api_client.upload_file(voice_info['path'], "opus", voice_info['file_name'], duration)
-                message_api_client.send_audio("chat_id", chat_id, file_key)
+                saved_count = 0
+                for img_key in image_keys:
+                    try:
+                        img_data = message_api_client.get_message_resource(message.message_id, img_key, "image")
+                        save_path = os.path.join(save_dir, f"{img_key}.jpg")
+                        with open(save_path, "wb") as f:
+                            f.write(img_data)
+                        saved_count += 1
+                    except Exception as dl_err:
+                        logging.error(f"保存图片 {img_key} 失败: {dl_err}")
+                
+                message_api_client.send_text("chat_id", chat_id, f"成功保存了 {saved_count} 张图片到服务器。")
             except Exception as e:
-                logging.error(f"随机语音回复失败: {e}")
-                message_api_client.send_text("chat_id", chat_id, "抱歉，语音抽取失败了...")
-        else:
-            message_api_client.send_text("chat_id", chat_id, "语音库目前是空的哦。")
-        return jsonify()
+                logging.error(f"上传图片逻辑出错: {e}")
+                message_api_client.send_text("chat_id", chat_id, "保存图片时出了点问题...")
+            return jsonify()
 
-    # 逻辑 2：对于非 @ 的群聊消息，通常不作处理（避免刷屏）
-    # 如果是群聊且没被 @，直接返回
+        # 逻辑 2：随机语音指令
+        VOICE_KEYWORDS = ["随机语音", "抽一个", "试音", "来一句", "试听"]
+        if any(kw in text_content for kw in VOICE_KEYWORDS):
+            logging.info(f"触发语音回复逻辑。类型: {chat_type}, ChatID: {chat_id}, 内容: {text_content}")
+            voice_info = voice_manager.get_random_voice()
+            if voice_info:
+                try:
+                    post_content = {
+                        "zh_cn": {
+                            "title": "语音试听",
+                            "content": [
+                                [{"tag": "text", "text": f"为您随机抽取了 【{voice_info['cv_name']}】 的语音试听："}]
+                            ]
+                        }
+                    }
+                    if voice_info.get('avatar_path'):
+                        try:
+                            img_key = message_api_client.upload_image(voice_info['avatar_path'])
+                            if img_key:
+                                post_content["zh_cn"]["content"].append([{"tag": "img", "image_key": img_key}])
+                        except Exception as img_err:
+                            logging.error(f"头像上传失败: {img_err}")
+                    message_api_client.send_post("chat_id", chat_id, post_content)
+                    duration = get_audio_duration(voice_info['path'])
+                    file_key = message_api_client.upload_file(voice_info['path'], "opus", voice_info['file_name'], duration)
+                    message_api_client.send_audio("chat_id", chat_id, file_key)
+                except Exception as e:
+                    logging.error(f"随机语音回复失败: {e}")
+                    message_api_client.send_text("chat_id", chat_id, "抱歉，语音抽取失败了...")
+            else:
+                message_api_client.send_text("chat_id", chat_id, "语音库目前是空的哦。")
+            return jsonify()
+
+    # 逻辑 3：对于群聊中未被 @ 的消息，直接返回（不回复）
     if chat_type == "group":
         return jsonify()
 
-    # 逻辑 3：默认兜底（通常私聊非文本消息会走到这里，但前面已经过滤了非 text）
+    # 逻辑 4：私聊中的兜底回复（Echo）
     message_api_client.send_text("chat_id", chat_id, f"Echo: {text_content}")
     return jsonify()
 

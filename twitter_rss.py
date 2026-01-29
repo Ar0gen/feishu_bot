@@ -192,6 +192,11 @@ class TwitterRssFetcher:
                 beijing_time = dt.astimezone(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
             except: pass
 
+        # 视频检测：检查是否有直链、Video 文字或者视频缩略图模式
+        has_video = bool(re.search(r'<source [^>]*src="([^"]+)"', description)) or \
+                    "<br>Video<br>" in description or \
+                    "video_thumb" in description
+
         return {
             "id": tweet_id,
             "title": entry.get('title', ""),
@@ -202,6 +207,7 @@ class TwitterRssFetcher:
             "content": self._clean_html_tags(description),
             "images": self._extract_images(entry, description),
             "videos": re.findall(r'<source [^>]*src="([^"]+)"', description),
+            "has_video": has_video,
             "is_retweet": entry.title.startswith("RT by") if 'title' in entry else False
         }
 
@@ -275,6 +281,10 @@ class TwitterRssFetcher:
         display_name = display_name or self.twitter_username
         verb = "转发了" if tweet['is_retweet'] else "更新了"
         
+        # 标题增加视频标识
+        video_prefix = "📹 " if tweet.get('has_video') else ""
+        video_suffix = "视频" if tweet.get('has_video') else ""
+        
         # 构建正文内容
         text = f"**作者：** {tweet['author']}\n**时间：** {tweet['published']}\n\n{tweet['content']}"
         
@@ -310,12 +320,12 @@ class TwitterRssFetcher:
             "schema": "2.0",
             "header": {
                 "title": {
-                    "content": f"{display_name} {verb}推特", 
+                    "content": f"{video_prefix}{display_name} {verb}推特", 
                     "tag": "plain_text"
                 }, 
                 "template": "blue"
             },
-            "config": {"streaming_mode": True, "summary": {"content": f"{display_name} 推特更新"}},
+            "config": {"streaming_mode": True, "summary": {"content": f"{video_prefix}{display_name} 推特{video_suffix}"}},
             "body": {"elements": elements}
         }
 
