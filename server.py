@@ -5,6 +5,7 @@ import logging
 import requests
 from datetime import datetime
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from api import MessageApiClient
 from event import MessageReceiveEvent, UrlVerificationEvent, EventManager
 from flask import Flask, jsonify, json
@@ -37,6 +38,9 @@ event_manager = EventManager()
 voice_manager = VoiceManager()
 image_manager = ImageManager()
 config_manager = ConfigManager()
+
+# 初始化线程池，处理耗时业务逻辑
+message_executor = ThreadPoolExecutor(max_workers=10)
 
 # 要监控的推特用户列表
 MONITOR_USERS = ["aoki__hina"]
@@ -249,12 +253,23 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
     PROCESSED_EVENT_IDS.append(event_id)
 
     logging.info(f"Received message: {req_data}")
-    sender_id = req_data.event.sender.sender_id
+    # 异步处理业务逻辑
+    message_executor.submit(handle_message_logic, req_data)
+    
+    # 立即向飞书返回响应，避免重试
+    return jsonify()
+
+
+def handle_message_logic(req_data: MessageReceiveEvent):
+    """
+    具体的业务逻辑处理函数，在独立线程中运行
+    """
     message = req_data.event.message
+    sender_id = req_data.event.sender.sender_id
     
     if message.message_type not in ["text", "post"]:
         logging.warn(f"Message type {message.message_type} has not been processed yet")
-        return jsonify()
+        return
 
     chat_id = message.chat_id
     chat_type = message.chat_type
@@ -314,7 +329,7 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
             except Exception as e:
                 logging.error(f"上传图片逻辑出错: {e}")
                 message_api_client.send_text("chat_id", chat_id, "保存图片时出了点问题...")
-            return jsonify()
+            return
 
         # 逻辑 2：随机语音指令
         VOICE_KEYWORDS = ["随机语音", "抽一个", "试音", "来一句", "试听"]
@@ -325,9 +340,9 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
                 try:
                     post_content = {
                         "zh_cn": {
-                            "title": "语音试听",
+                            "title": "✨ 语音掉落",
                             "content": [
-                                [{"tag": "text", "text": f"为您随机抽取了 【{voice_info['cv_name']}】 的语音试听："}]
+                                [{"tag": "text", "text": f"叮咚！为您捕捉到了 【{voice_info['cv_name']}】 的一段语音，请查收~ 🎧"}]
                             ]
                         }
                     }
@@ -347,7 +362,7 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
                     message_api_client.send_text("chat_id", chat_id, "抱歉，语音抽取失败了...")
             else:
                 message_api_client.send_text("chat_id", chat_id, "语音库目前是空的哦。")
-            return jsonify()
+            return
 
         # 逻辑 3：随机图片指令
         IMAGE_KEYWORDS = ["随机图片", "抽一张图", "看看图", "美图", "图片"]
@@ -358,14 +373,26 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
                 try:
                     # 1. 上传图片获取 image_key
                     img_key = message_api_client.upload_image(img_path)
-                    # 2. 发送图片
-                    message_api_client.send_image("chat_id", chat_id, img_key)
+                    
+                    # 2. 构造富文本内容
+                    post_content = {
+                        "zh_cn": {
+                            "title": "🖼️ 随机美图",
+                            "content": [
+                                [{"tag": "text", "text": "您要的今日份女声优 ✨"}]
+                            ]
+                        }
+                    }
+                    post_content["zh_cn"]["content"].append([{"tag": "img", "image_key": img_key}])
+                    
+                    # 3. 发送富文本
+                    message_api_client.send_post("chat_id", chat_id, post_content)
                 except Exception as e:
                     logging.error(f"随机图片发送失败: {e}")
                     message_api_client.send_text("chat_id", chat_id, "抱歉，图片抽取失败了...")
             else:
                 message_api_client.send_text("chat_id", chat_id, "图片库目前是空的哦。")
-            return jsonify()
+            return
 
         # 逻辑 4：推送控制指令
         if "开启每日一图" in text_content:
@@ -373,27 +400,27 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
                 message_api_client.send_text("chat_id", chat_id, "✅ 已为您开启本群的【每日一图】推送功能。")
             else:
                 message_api_client.send_text("chat_id", chat_id, "ℹ️ 本群已经开启过推送功能啦。")
-            return jsonify()
+            return
 
         if "关闭每日一图" in text_content:
             if config_manager.disable_daily_push(chat_id):
                 message_api_client.send_text("chat_id", chat_id, "❌ 已为您关闭本群的【每日一图】推送功能。")
             else:
                 message_api_client.send_text("chat_id", chat_id, "ℹ️ 本群之前就没有开启推送功能哦。")
-            return jsonify()
+            return
 
         if "推送状态" in text_content:
             status = "✅ 已开启" if config_manager.is_daily_push_enabled(chat_id) else "❌ 未开启"
             message_api_client.send_text("chat_id", chat_id, f"📊 【每日一图】推送状态：{status}")
-            return jsonify()
+            return
 
     # 逻辑 5：对于群聊中未被 @ 的消息，直接返回（不回复）
     if chat_type == "group":
-        return jsonify()
+        return
 
     # 逻辑 6：私聊中的兜底回复（Echo）
     message_api_client.send_text("chat_id", chat_id, f"Echo: {text_content}")
-    return jsonify()
+
 
 
 @app.errorhandler
