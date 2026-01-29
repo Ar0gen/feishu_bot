@@ -12,6 +12,8 @@ from dotenv import load_dotenv, find_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from twitter_rss import TwitterRssFetcher
 from voice_manager import VoiceManager
+from image_manager import ImageManager
+from config_manager import ConfigManager
 from utils import get_audio_duration
 
 # load env parameters form file named .env
@@ -33,6 +35,8 @@ TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 message_api_client = MessageApiClient(APP_ID, APP_SECRET, LARK_HOST)
 event_manager = EventManager()
 voice_manager = VoiceManager()
+image_manager = ImageManager()
+config_manager = ConfigManager()
 
 # 要监控的推特用户列表
 MONITOR_USERS = ["aoki__hina"]
@@ -150,10 +154,79 @@ def refresh_voice_index():
     logging.info(f"语音库索引刷新完成，当前共有 {len(voice_manager.voice_pool)} 条语音素材")
 
 
+def refresh_image_index():
+    logging.info("开始定时刷新图片库索引...")
+    image_manager.refresh_index()
+    logging.info(f"图片库索引刷新完成，当前共有 {len(image_manager.image_pool)} 条图片素材")
+
+
+def send_daily_push(text):
+    """
+    每日一图广播功能
+    """
+    logging.info(f"开始执行每日推送: {text}")
+    
+    # 1. 获取所有群聊
+    try:
+        chats = message_api_client.get_bot_chats()
+        all_chat_ids = [chat['chat_id'] for chat in chats]
+        
+        # 过滤出开启了每日一图推送的群聊
+        target_chat_ids = [cid for cid in all_chat_ids if config_manager.is_daily_push_enabled(cid)]
+        
+        if not target_chat_ids:
+            logging.warning("未发现开启了每日一图推送的群聊，跳过推送")
+            return
+    except Exception as e:
+        logging.error(f"每日推送获取群聊失败: {e}")
+        return
+
+    # 2. 随机抽取图片
+    img_path = image_manager.get_random_image()
+    if not img_path:
+        logging.warning("图库为空，跳过每日推送")
+        return
+
+    try:
+        # 3. 上传图片
+        img_key = message_api_client.upload_image(img_path)
+        
+        # 4. 构造富文本
+        post_content = {
+            "zh_cn": {
+                "title": "📅 每日一图",
+                "content": [
+                    [{"tag": "text", "text": text}],
+                    [{"tag": "img", "image_key": img_key}]
+                ]
+            }
+        }
+        
+        # 5. 广播
+        for chat_id in target_chat_ids:
+            try:
+                message_api_client.send_post("chat_id", chat_id, post_content)
+                logging.info(f"每日推送成功发送至: {chat_id}")
+            except Exception as e:
+                logging.error(f"每日推送发送至 {chat_id} 失败: {e}")
+                
+    except Exception as e:
+        logging.error(f"每日推送准备过程出错: {e}")
+
+
 # 初始化定时任务
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_twitter_updates, "interval", minutes=1)
 scheduler.add_job(refresh_voice_index, "interval", minutes=5)
+scheduler.add_job(refresh_image_index, "interval", minutes=5)
+
+# 每日一图定时任务（北京时间）
+# 工作日早上 10:00
+scheduler.add_job(send_daily_push, 'cron', day_of_week='mon-fri', hour=10, minute=0, args=["今天工作加油 💪"])
+# 工作日晚上 20:30
+scheduler.add_job(send_daily_push, 'cron', day_of_week='mon-fri', hour=20, minute=30, args=["今天辛苦啦 🌟"])
+# 休息日早上 10:30
+scheduler.add_job(send_daily_push, 'cron', day_of_week='sat-sun', hour=10, minute=30, args=["休息日快乐 🎈"])
 
 
 @event_manager.register("url_verification")
@@ -231,8 +304,13 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
                         saved_count += 1
                     except Exception as dl_err:
                         logging.error(f"保存图片 {img_key} 失败: {dl_err}")
-                
+
+
                 message_api_client.send_text("chat_id", chat_id, f"成功保存了 {saved_count} 张图片到服务器。")
+                
+                # 如果有新图片保存成功，立即刷新图库索引
+                if saved_count > 0:
+                    image_manager.refresh_index()
             except Exception as e:
                 logging.error(f"上传图片逻辑出错: {e}")
                 message_api_client.send_text("chat_id", chat_id, "保存图片时出了点问题...")
@@ -271,11 +349,49 @@ def message_receive_event_handler(req_data: MessageReceiveEvent):
                 message_api_client.send_text("chat_id", chat_id, "语音库目前是空的哦。")
             return jsonify()
 
-    # 逻辑 3：对于群聊中未被 @ 的消息，直接返回（不回复）
+        # 逻辑 3：随机图片指令
+        IMAGE_KEYWORDS = ["随机图片", "抽一张图", "看看图", "美图", "图片"]
+        if any(kw in text_content for kw in IMAGE_KEYWORDS):
+            logging.info(f"触发随机图片逻辑。类型: {chat_type}, ChatID: {chat_id}, 内容: {text_content}")
+            img_path = image_manager.get_random_image()
+            if img_path:
+                try:
+                    # 1. 上传图片获取 image_key
+                    img_key = message_api_client.upload_image(img_path)
+                    # 2. 发送图片
+                    message_api_client.send_image("chat_id", chat_id, img_key)
+                except Exception as e:
+                    logging.error(f"随机图片发送失败: {e}")
+                    message_api_client.send_text("chat_id", chat_id, "抱歉，图片抽取失败了...")
+            else:
+                message_api_client.send_text("chat_id", chat_id, "图片库目前是空的哦。")
+            return jsonify()
+
+        # 逻辑 4：推送控制指令
+        if "开启每日一图" in text_content:
+            if config_manager.enable_daily_push(chat_id):
+                message_api_client.send_text("chat_id", chat_id, "✅ 已为您开启本群的【每日一图】推送功能。")
+            else:
+                message_api_client.send_text("chat_id", chat_id, "ℹ️ 本群已经开启过推送功能啦。")
+            return jsonify()
+
+        if "关闭每日一图" in text_content:
+            if config_manager.disable_daily_push(chat_id):
+                message_api_client.send_text("chat_id", chat_id, "❌ 已为您关闭本群的【每日一图】推送功能。")
+            else:
+                message_api_client.send_text("chat_id", chat_id, "ℹ️ 本群之前就没有开启推送功能哦。")
+            return jsonify()
+
+        if "推送状态" in text_content:
+            status = "✅ 已开启" if config_manager.is_daily_push_enabled(chat_id) else "❌ 未开启"
+            message_api_client.send_text("chat_id", chat_id, f"📊 【每日一图】推送状态：{status}")
+            return jsonify()
+
+    # 逻辑 5：对于群聊中未被 @ 的消息，直接返回（不回复）
     if chat_type == "group":
         return jsonify()
 
-    # 逻辑 4：私聊中的兜底回复（Echo）
+    # 逻辑 6：私聊中的兜底回复（Echo）
     message_api_client.send_text("chat_id", chat_id, f"Echo: {text_content}")
     return jsonify()
 
