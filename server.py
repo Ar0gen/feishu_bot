@@ -3,6 +3,7 @@
 import os
 import logging
 import requests
+import re
 from datetime import datetime
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from twitter_rss import TwitterRssFetcher
 from voice_manager import VoiceManager
 from image_manager import ImageManager
 from config_manager import ConfigManager
+from alias_manager import AliasManager
 from utils import get_audio_duration
 
 # load env parameters form file named .env
@@ -38,6 +40,7 @@ event_manager = EventManager()
 voice_manager = VoiceManager()
 image_manager = ImageManager()
 config_manager = ConfigManager()
+alias_manager = AliasManager()
 
 # 初始化线程池，处理耗时业务逻辑
 message_executor = ThreadPoolExecutor(max_workers=10)
@@ -300,28 +303,42 @@ def handle_message_logic(req_data: MessageReceiveEvent):
     should_process_command = (chat_type == "p2p") or (chat_type == "group" and message.mentions)
     
     if should_process_command:
-        # 逻辑 1：上传图片指令（仅在消息包含图片且含有关键词时触发）
+        # 逻辑 1：上传图片指令（支持指定多个或多个人物名，支持别名）
         if "上传图片" in text_content and image_keys:
-            logging.info(f"触发上传图片逻辑。ChatID: {chat_id}, 图片数量: {len(image_keys)}")
+            # 提取关键词后面的所有内容并按空格分割
+            names_part = text_content.partition("上传图片")[2].strip()
+            input_names = names_part.split() if names_part else ["未分类"]
+            
+            # 别名解析转换
+            person_names = alias_manager.resolve_list(input_names)
+            
+            logging.info(f"触发上传图片逻辑。原始输入: {input_names}, 转换后: {person_names}, ChatID: {chat_id}")
             try:
                 data_root = os.getenv("DATA_ROOT", "data")
                 date_str = datetime.now().strftime("%Y-%m-%d")
-                save_dir = os.path.join(data_root, "image", date_str)
-                os.makedirs(save_dir, exist_ok=True)
                 
                 saved_count = 0
                 for img_key in image_keys:
                     try:
+                        # 1. 下载资源（只需下载一次）
                         img_data = message_api_client.get_message_resource(message.message_id, img_key, "image")
-                        save_path = os.path.join(save_dir, f"{img_key}.jpg")
-                        with open(save_path, "wb") as f:
-                            f.write(img_data)
+                        
+                        # 2. 分别保存到所有指定的人物文件夹中
+                        for person_name in person_names:
+                            # 存储路径：data/image/人物名/日期/
+                            save_dir = os.path.join(data_root, "image", person_name, date_str)
+                            os.makedirs(save_dir, exist_ok=True)
+                            save_path = os.path.join(save_dir, f"{img_key}.jpg")
+                            with open(save_path, "wb") as f:
+                                f.write(img_data)
+                        
                         saved_count += 1
                     except Exception as dl_err:
                         logging.error(f"保存图片 {img_key} 失败: {dl_err}")
 
-
-                message_api_client.send_text("chat_id", chat_id, f"成功保存了 {saved_count} 张图片到服务器。")
+                feedback_names = "】、【".join(person_names)
+                feedback_msg = f"成功保存了 {saved_count} 张图片到 【{feedback_names}】 的图库。"
+                message_api_client.send_text("chat_id", chat_id, feedback_msg)
                 
                 # 如果有新图片保存成功，立即刷新图库索引
                 if saved_count > 0:
@@ -364,11 +381,17 @@ def handle_message_logic(req_data: MessageReceiveEvent):
                 message_api_client.send_text("chat_id", chat_id, "语音库目前是空的哦。")
             return
 
-        # 逻辑 3：随机图片指令
-        IMAGE_KEYWORDS = ["随机图片", "抽一张图", "看看图", "美图", "图片"]
-        if any(kw in text_content for kw in IMAGE_KEYWORDS):
-            logging.info(f"触发随机图片逻辑。类型: {chat_type}, ChatID: {chat_id}, 内容: {text_content}")
-            img_path = image_manager.get_random_image()
+        # 逻辑 3：随机图片指令（支持指定一个或多个人物名，支持别名）
+        if "随机图片" in text_content:
+            # 提取关键词后面的所有内容并按空格分割
+            names_part = text_content.partition("随机图片")[2].strip()
+            input_names = names_part.split() if names_part else None
+            
+            # 别名解析转换
+            person_names = alias_manager.resolve_list(input_names) if input_names else None
+            
+            logging.info(f"触发随机图片逻辑。目标人物列表: {person_names}, ChatID: {chat_id}")
+            img_path = image_manager.get_random_image(person_names)
             if img_path:
                 try:
                     # 1. 上传图片获取 image_key
@@ -391,7 +414,12 @@ def handle_message_logic(req_data: MessageReceiveEvent):
                     logging.error(f"随机图片发送失败: {e}")
                     message_api_client.send_text("chat_id", chat_id, "抱歉，图片抽取失败了...")
             else:
-                message_api_client.send_text("chat_id", chat_id, "图片库目前是空的哦。")
+                if not person_names:
+                    msg = "图库目前是空的哦。"
+                else:
+                    feedback_names = "】、【".join(person_names)
+                    msg = f"还没有搜集到 【{feedback_names}】 的图片哦。"
+                message_api_client.send_text("chat_id", chat_id, msg)
             return
 
         # 逻辑 4：推送控制指令
@@ -414,11 +442,85 @@ def handle_message_logic(req_data: MessageReceiveEvent):
             message_api_client.send_text("chat_id", chat_id, f"📊 【每日一图】推送状态：{status}")
             return
 
-    # 逻辑 5：对于群聊中未被 @ 的消息，直接返回（不回复）
+        # 逻辑 5：别名管理指令
+        if "添加别名" in text_content:
+            # 格式：添加别名 [别名1;别名2] [规范名]
+            raw_part = text_content.partition("添加别名")[2].strip()
+            parts = raw_part.split()
+            if len(parts) >= 2:
+                canonical_name = parts[-1]  # 最后一个词作为本名
+                alias_raw = " ".join(parts[:-1]) # 前面部分作为别名
+                
+                # 支持多种分隔符：分号、逗号、竖线、空格
+                aliases = [a.strip() for a in re.split(r'[;；,，|\t]+', alias_raw) if a.strip()]
+                
+                if not aliases:
+                    message_api_client.send_text("chat_id", chat_id, "❌ 未识别到有效的别名，请检查格式。")
+                    return
+
+                # 强校验：规范名必须存在于图库中
+                if image_manager.is_person_exists(canonical_name):
+                    success_list = []
+                    for alias in aliases:
+                        if alias_manager.add_alias(alias, canonical_name):
+                            success_list.append(alias)
+                    
+                    if success_list:
+                        aliases_str = "】、【".join(success_list)
+                        message_api_client.send_text("chat_id", chat_id, f"✅ 绑定成功！现在可以用 【{aliases_str}】 来指代 【{canonical_name}】 啦。")
+                    else:
+                        message_api_client.send_text("chat_id", chat_id, "❌ 别名保存失败，请稍后再试。")
+                else:
+                    message_api_client.send_text("chat_id", chat_id, f"❌ 图库中还没有 【{canonical_name}】 的文件夹噢，请先上传照片或手动创建文件夹。")
+            else:
+                message_api_client.send_text("chat_id", chat_id, "ℹ️ 用法提示：添加别名 [别名1;别名2] [本名]\n例如：添加别名 圣青木;猪咪 青木阳菜")
+            return
+
+        if "别名列表" in text_content or "查看别名" in text_content:
+            # 格式：别名列表 [本名]
+            keyword = "别名列表" if "别名列表" in text_content else "查看别名"
+            target_name = text_content.partition(keyword)[2].strip()
+            if target_name:
+                aliases = alias_manager.get_aliases_by_name(target_name)
+                if aliases:
+                    msg = f"🔍 【{target_name}】 的已知别名有：\n" + "、".join(aliases)
+                else:
+                    msg = f"ℹ️ 暂时还没有人为 【{target_name}】 添加过别名哦。"
+                message_api_client.send_text("chat_id", chat_id, msg)
+            else:
+                message_api_client.send_text("chat_id", chat_id, "ℹ️ 用法提示：别名列表 [本名]")
+            return
+
+        if "谁是" in text_content:
+            alias = text_content.partition("谁是")[2].strip()
+            if alias:
+                canonical_name = alias_manager.get_canonical_name(alias)
+                if canonical_name:
+                    message_api_client.send_text("chat_id", chat_id, f"💡 【{alias}】 就是 【{canonical_name}】 哒！")
+                else:
+                    message_api_client.send_text("chat_id", chat_id, f"❓ 机器人还不认识 【{alias}】 呢，你可以用“添加别名”指令教教我。")
+            return
+
+        # 逻辑 6：图库查询指令
+        if any(kw in text_content for kw in ["查人", "查看人物", "图库列表"]):
+            persons = image_manager.get_all_persons()
+            if persons:
+                lines = [f"📊 当前图库已有 {len(persons)} 位女声优："]
+                for p in persons:
+                    # 尝试获取别名预览
+                    aliases = alias_manager.get_aliases_by_name(p['name'])
+                    alias_str = f" ({'、'.join(aliases[:2])}...)" if aliases else ""
+                    lines.append(f"• 【{p['name']}】: {p['count']} 张{alias_str}")
+                message_api_client.send_text("chat_id", chat_id, "\n".join(lines))
+            else:
+                message_api_client.send_text("chat_id", chat_id, "📁 图库目前是空的哦。")
+            return
+
+    # 逻辑 7：对于群聊中未被 @ 的消息，直接返回（不回复）
     if chat_type == "group":
         return
 
-    # 逻辑 6：私聊中的兜底回复（Echo）
+    # 逻辑 8：私聊中的兜底回复（Echo）
     message_api_client.send_text("chat_id", chat_id, f"Echo: {text_content}")
 
 
