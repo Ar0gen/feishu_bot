@@ -325,7 +325,7 @@ class TwitterRssFetcher:
                 }, 
                 "template": "blue"
             },
-            "config": {"streaming_mode": True, "summary": {"content": f"{video_prefix}{display_name} 推特{video_suffix}"}},
+            "config": {"streaming_mode": False, "summary": {"content": f"{video_prefix}{display_name} 推特{video_suffix}"}},
             "body": {"elements": elements}
         }
 
