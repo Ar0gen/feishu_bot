@@ -8,6 +8,7 @@ dependencies = [
     "apscheduler>=3.11.2",
     "feedparser>=6.0.12",
     "flask==2.0.2",
+    "openai>=1.68.0",
     "pycryptodome>=3.23.0",
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",

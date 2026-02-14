@@ -73,6 +73,21 @@ sh exec.sh
    uv run python3 server.py
    ```
 
+## AI Tweet Filter
+
+Set environment variables in `.env` to enable AI filtering.
+
+```
+AI_FILTER_ENABLED=true
+AI_FILTER_PROMPT=Only allow life-sharing posts by female voice actors; filter out commercial collaborations. Reply YES or NO only.
+AI_FILTER_IMAGE_LIMIT=0
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+```
+
+`AI_FILTER_IMAGE_LIMIT` controls how many tweet images are sent to the model. When empty or <= 0, image input is disabled.
+
 ## Complete the configuration and experience the bot
 
 The messages received by the bot are all in the format of callback event request. Using the POST request method, they

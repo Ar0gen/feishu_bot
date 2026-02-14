@@ -73,6 +73,21 @@ uv sync
 uv run python3 server.py
 ```
 
+## AI 推文筛选
+
+在 `.env` 中配置以下变量开启筛选。
+
+```text
+AI_FILTER_ENABLED=true
+AI_FILTER_PROMPT=仅包含女声优的生活分享，过滤掉商务合作等内容。只回答 YES 或 NO，YES 表示符合要求。
+AI_FILTER_IMAGE_LIMIT=0
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+```
+
+`AI_FILTER_IMAGE_LIMIT` 控制传给模型的图片数量，留空或 <= 0 时关闭图片输入。
+
 ## 完成配置，体验机器人
 
 机器人接收的消息都会以回调事件请求形式，通过 POST 请求方式，送达到服务端处理。所以本地服务端启动之后，回调事件无法请求到内网，需要配置公网请求 URL。
