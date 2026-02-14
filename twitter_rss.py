@@ -48,8 +48,18 @@ class TwitterRssFetcher:
         
         self.twitter_username = twitter_username.strip().replace('@', '')
         self.history_file = os.path.join(self.history_dir, f"{self.twitter_username}.json")
+        self.allowed_tweet_types = self._parse_allowed_tweet_types(os.getenv("TWEET_TYPES", "original"))
         # 确保目录存在
         os.makedirs(self.history_dir, exist_ok=True)
+
+    def _parse_allowed_tweet_types(self, value: Optional[str]) -> set:
+        if not value:
+            return {"original"}
+        normalized = {part.strip().lower() for part in re.split(r"[\s,;]+", value) if part.strip()}
+        if "all" in normalized:
+            return {"original", "retweet"}
+        allowed = {t for t in normalized if t in {"original", "retweet"}}
+        return allowed or {"original"}
 
     def _load_history(self) -> List[str]:
         """加载历史已发送推文 ID 列表"""
@@ -256,9 +266,13 @@ class TwitterRssFetcher:
         
         # RSS 为降序，反转为升序处理以保持历史记录顺序
         for tweet in reversed(all_tweets):
-            if tweet['id'] not in history_ids:
-                new_tweets.append(tweet)
-                history_ids.append(tweet['id'])
+            if tweet['id'] in history_ids:
+                continue
+            history_ids.append(tweet['id'])
+            tweet_type = "retweet" if tweet.get("is_retweet") else "original"
+            if tweet_type not in self.allowed_tweet_types:
+                continue
+            new_tweets.append(tweet)
         
         if new_tweets:
             self._save_history(history_ids)

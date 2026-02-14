@@ -18,6 +18,7 @@ from image_manager import ImageManager
 from config_manager import ConfigManager
 from alias_manager import AliasManager
 from utils import get_audio_duration
+from ai_filter import AITweetFilter
 
 # load env parameters form file named .env
 load_dotenv(find_dotenv())
@@ -41,6 +42,7 @@ voice_manager = VoiceManager()
 image_manager = ImageManager()
 config_manager = ConfigManager()
 alias_manager = AliasManager()
+ai_tweet_filter = AITweetFilter()
 
 # 初始化线程池，处理耗时业务逻辑
 message_executor = ThreadPoolExecutor(max_workers=10)
@@ -126,6 +128,9 @@ def check_twitter_updates():
             new_tweets = fetcher.get_new_tweets()
             if new_tweets:
                 for tweet in new_tweets:
+                    if not ai_tweet_filter.is_allowed(tweet):
+                        logging.info(f"AI 过滤未通过: @{username} - {tweet['id']}")
+                        continue
                     logging.info(f"【定时任务】发现新推文: @{username} ({display_name}) - {tweet['id']}，准备推送卡片...")
                     
                     # 1. 上传图片获取 image_keys

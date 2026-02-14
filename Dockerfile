@@ -1,12 +1,20 @@
-FROM python:3
+FROM python:3.12-slim
 
-WORKDIR /home/app
+WORKDIR /app
 
-#If we add the requirements and install dependencies first, docker can use cache if requirements don't change
-ADD requirements.txt /home/app
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ENV UV_SYSTEM_PYTHON=1
+ENV UV_NO_DEV=1
 
-ADD . /home/app
-CMD python server.py
+ADD pyproject.toml /app
+ADD uv.lock /app
+RUN uv sync --locked --no-install-project
+
+ADD . /app
+RUN uv sync --locked
 
 EXPOSE 3000
+
+ENTRYPOINT [ "uv", "run", "server.py" ]
+
+

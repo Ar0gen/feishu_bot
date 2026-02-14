@@ -8,6 +8,7 @@
 ## 运行环境
 
 - [Python 3](https://www.python.org/)
+- [uv](https://github.com/astral-sh/uv)
 - [ngrok](https://ngrok.com/download) （内网穿透工具）
 
 ## 准备工作
@@ -54,39 +55,38 @@ sh exec.sh
 
 ## 本地运行
 
-1、创建并激活一个新的虚拟环境
-
-**mac/linux**
-
-```commandline
-python3 -m venv venv
-. venv/bin/activate
-```
-
-**windows**
-
-```commandline
-python3 -m venv venv
-venv\Scripts\activate
-```
-
-激活后，终端会显示虚拟环境的名称
+1、安装 uv
 
 ```
-(venv) **** python %
-```
+pip install uv
+```     
 
 2、安装依赖
 
+```commandline
+uv sync
 ```
-pip install -r requirements.txt
-```     
 
 3、运行
 
 ```
-python3 server.py
+uv run python3 server.py
 ```
+
+## AI 推文筛选
+
+在 `.env` 中配置以下变量开启筛选。
+
+```text
+AI_FILTER_ENABLED=true
+AI_FILTER_PROMPT=仅包含女声优的生活分享，过滤掉商务合作等内容。只回答 YES 或 NO，YES 表示符合要求。
+AI_FILTER_IMAGE_LIMIT=0
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+```
+
+`AI_FILTER_IMAGE_LIMIT` 控制传给模型的图片数量，留空或 <= 0 时关闭图片输入。
 
 ## 完成配置，体验机器人
 
