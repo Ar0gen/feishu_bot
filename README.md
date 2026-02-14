@@ -8,6 +8,7 @@ can extend the event processing functions of bot based on this example.
 ## Runtime environment
 
 - [Python 3](https://www.python.org/)
+- [uv](https://github.com/astral-sh/uv)
 - [ngrok](https://ngrok.com/download) (intranet penetration tool)
 
 ## Prep work
@@ -54,35 +55,22 @@ sh exec.sh
 
 ## Running Locally
 
-1. Create and activate a new virtual environment.
+1. Install uv
 
-   **Mac/Linux**
    ```
-   python3 -m venv venv 
-   . venv/bin/activate
-   ```
-
-   **Windows**
-   ```
-   python3 -m venv venv 
-   venv\Scripts\activate
-   ```
-
-   Once activated, the terminal will display the virtual environment's name.
-   ```
-   (venv) **** python %
+   pip install uv
    ```
 
 2. Install dependencies
 
    ```
-   pip install -r requirements.txt
+   uv sync
    ```
 
 3. Run
 
    ```
-   python3 server.py
+   uv run python3 server.py
    ```
 
 ## Complete the configuration and experience the bot
